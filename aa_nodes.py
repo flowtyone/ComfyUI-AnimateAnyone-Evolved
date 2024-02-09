@@ -3,7 +3,7 @@ import inspect
 from collections import OrderedDict
 from omegaconf import OmegaConf
 
-from comfy import latent_formats
+from comfy import latent_formats, model_management
 import folder_paths as comfy_paths
 
 import torch
@@ -23,11 +23,44 @@ from .src.models.unet_2d_condition import UNet2DConditionModel
 from .src.models.unet_3d import UNet3DConditionModel
 from .src.models.main_diffuser import AADiffusion
 
-ROOT_PATH = os.path.join(comfy_paths.get_folder_paths("custom_nodes")[0], "./ComfyUI-AnimateAnyone-Evolved")
-DEFAULT_CONFIG_PATH = os.path.join(ROOT_PATH, "./configs/default.yaml")
+ROOT_PATH = os.path.join(comfy_paths.models_dir, "Moore-AnimateAnyone")
+
+#TODO: rexport object_info and test in local
+if not os.path.exists(ROOT_PATH):
+    import shutil
+    from huggingface_hub import hf_hub_download
+
+    os.makedirs(os.path.dirname(ROOT_PATH), exist_ok=True)
+    shutil.copytree(os.path.join(os.path.dirname(__file__), "pretrained_weights"), ROOT_PATH)
+
+    files = [
+        "denoising_unet.pth",
+        "motion_module.pth",
+        "pose_guider.pth",
+        "reference_unet.pth"
+    ]
+
+    for file in files:
+        hf_hub_download(
+            local_dir=ROOT_PATH,
+            filename=file,
+            repo_id="patrolli/AnimateAnyone",
+            repo_type="model",
+            local_dir_use_symlinks=False
+        )
+
+    hf_hub_download(
+        local_dir=os.path.join(ROOT_PATH, "stable-diffusion-v1-5"),
+        filename="unet/diffusion_pytorch_model.bin",
+        repo_id="runwayml/stable-diffusion-v1-5",
+        repo_type="model",
+        local_dir_use_symlinks=False
+    )
+
+DEFAULT_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "./configs/default.yaml")
 CONFIG = OmegaConf.load(DEFAULT_CONFIG_PATH)
 
-DEVICE = 'cuda'
+DEVICE = model_management.get_torch_device()
 WEIGHT_DETYPE = torch.float16
 
 SCHEDULER_DICT = OrderedDict([
@@ -41,7 +74,7 @@ SCHEDULER_DICT = OrderedDict([
 ])
 
 class Animate_Anyone_Sampler:
-    
+
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -75,7 +108,7 @@ class Animate_Anyone_Sampler:
                 "lora_name": (comfy_paths.get_filename_list("loras"),),
             }
         }
-        
+
     RETURN_TYPES = (
         "LATENT",
     )
@@ -85,16 +118,16 @@ class Animate_Anyone_Sampler:
     FUNCTION = "animate_anyone"
 
     CATEGORY = "AnimateAnyone-Evolved"
-    
+
     def animate_anyone(
-        self, 
-        reference_unet, 
-        denoising_unet, 
-        ref_image_latent, 
-        clip_image_embeds, 
-        pose_latent, 
-        seed, 
-        steps, 
+        self,
+        reference_unet,
+        denoising_unet,
+        ref_image_latent,
+        clip_image_embeds,
+        pose_latent,
+        seed,
+        steps,
         cfg,
         delta,
         context_frames,
@@ -102,7 +135,7 @@ class Animate_Anyone_Sampler:
         context_overlap,
         context_batch_size,
         interpolation_factor,
-        sampler_scheduler_pairs, 
+        sampler_scheduler_pairs,
         beta_start,
         beta_end,
         beta_schedule,
@@ -114,18 +147,18 @@ class Animate_Anyone_Sampler:
         use_lora=False,
         lora_name=None
     ):
-        
+
         latent_format = latent_formats.SD15()
-        
+
         # encoder_hidden_states.shape: torch.Size([1, 1, 768]) clip_image_embeds.shape: torch.Size([1, 768])
         encoder_hidden_states = clip_image_embeds["image_embeds"].unsqueeze(1).to(DEVICE, dtype=WEIGHT_DETYPE)
 
         # forward reference image latent with shape (1, 4, 96, 64) to reference net
         ref_image_latent = latent_format.process_in(ref_image_latent["samples"]).to(DEVICE, dtype=WEIGHT_DETYPE)
-        
+
         # setup scheduler from user inputs
         scheduler_class = SCHEDULER_DICT[sampler_scheduler_pairs]
-        
+
         sched_kwargs = {
             "beta_start": beta_start,
             "beta_end": beta_end,
@@ -134,27 +167,27 @@ class Animate_Anyone_Sampler:
             "prediction_type": prediction_type,
             "timestep_spacing": timestep_spacing,
         }
-        
+
         if "clip_sample" in inspect.signature(scheduler_class.__init__).parameters:
             sched_kwargs["clip_sample"] = clip_sample
         if "rescale_betas_zero_snr" in inspect.signature(scheduler_class.__init__).parameters:
             sched_kwargs["rescale_betas_zero_snr"] = rescale_betas_zero_snr
-            
+
         scheduler = scheduler_class(**sched_kwargs)
-        
+
         # setup diffuser and then denoise
         diffuser = AADiffusion(reference_unet, denoising_unet, scheduler)
-        
+
         if use_lora:
             lora_path = comfy_paths.get_full_path("loras", lora_name)
             diffuser.load_lora(lora_path)
-        
+
         samples = diffuser(
-            steps, 
+            steps,
             cfg,
             delta,
             ref_image_latent,
-            pose_latent, 
+            pose_latent,
             encoder_hidden_states,
             seed,
             context_frames=context_frames,
@@ -164,10 +197,10 @@ class Animate_Anyone_Sampler:
             interpolation_factor=interpolation_factor,
         )
         samples = latent_format.process_out(samples)
-        
+
         # (1, 4, f, h, w) -> (f, 4, h, w)
         samples = torch.squeeze(samples, 0).permute(1, 0, 2, 3)
-        
+
         return ({"samples":samples}, )
 
 class Load_UNet2D_ConditionModel:
@@ -175,8 +208,8 @@ class Load_UNet2D_ConditionModel:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "pretrained_base_unet_folder_path": ("STRING", {"default": "./pretrained_weights/stable-diffusion-v1-5/unet/", "multiline": False}),
-                "unet2d_model_path": ("STRING", {"default": "./pretrained_weights/reference_unet.pth", "multiline": False}),     
+                "pretrained_base_unet_folder_path": ("STRING", {"default": "./stable-diffusion-v1-5/unet/", "multiline": False}),
+                #"unet2d_model_path": ("STRING", {"default": "./reference_unet.pth", "multiline": False}),
             },
         }
 
@@ -190,31 +223,31 @@ class Load_UNet2D_ConditionModel:
 
     CATEGORY = "AnimateAnyone-Evolved/loaders"
 
-    def load_unet2d(self, pretrained_base_unet_folder_path, unet2d_model_path):
+    def load_unet2d(self, pretrained_base_unet_folder_path="", unet2d_model_path="./reference_unet.pth"):
         if not os.path.isabs(pretrained_base_unet_folder_path):
             pretrained_base_unet_folder_path = os.path.join(ROOT_PATH, pretrained_base_unet_folder_path)
         if not os.path.isabs(unet2d_model_path):
-            unet2d_model_path = os.path.join(ROOT_PATH, unet2d_model_path)        
-        
-            
+            unet2d_model_path = os.path.join(ROOT_PATH, unet2d_model_path)
+
+
         unet2d = UNet2DConditionModel.from_pretrained(
             pretrained_base_unet_folder_path,
         ).to(dtype=WEIGHT_DETYPE, device=DEVICE)
-        
+
         unet2d.load_state_dict(
             torch.load(unet2d_model_path, map_location="cpu"),
         )
-        
+
         return (unet2d,)
-    
+
 class Load_UNet3D_ConditionModel:
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
-                "pretrained_base_unet_folder_path": ("STRING", {"default": "./pretrained_weights/stable-diffusion-v1-5/unet/", "multiline": False}),
-                "unet3d_model_path": ("STRING", {"default": "./pretrained_weights/denoising_unet.pth", "multiline": False}),
-                "motion_module_path": ("STRING", {"default": "./pretrained_weights/motion_module.pth", "multiline": False}),
+                "pretrained_base_unet_folder_path": ("STRING", {"default": "./stable-diffusion-v1-5/unet/", "multiline": False}),
+                #"unet3d_model_path": ("STRING", {"default": "./denoising_unet.pth", "multiline": False}),
+                #"motion_module_path": ("STRING", {"default": "./motion_module.pth", "multiline": False}),
             },
         }
 
@@ -228,33 +261,33 @@ class Load_UNet3D_ConditionModel:
 
     CATEGORY = "AnimateAnyone-Evolved/loaders"
 
-    def load_unet3d(self, pretrained_base_unet_folder_path, unet3d_model_path, motion_module_path):
+    def load_unet3d(self, pretrained_base_unet_folder_path, unet3d_model_path="./denoising_unet.pth", motion_module_path="./motion_module.pth"):
         if not os.path.isabs(pretrained_base_unet_folder_path):
-            pretrained_base_unet_folder_path = os.path.join(ROOT_PATH, pretrained_base_unet_folder_path)     
+            pretrained_base_unet_folder_path = os.path.join(ROOT_PATH, pretrained_base_unet_folder_path)
         if not os.path.isabs(unet3d_model_path):
             unet3d_model_path = os.path.join(ROOT_PATH, unet3d_model_path)
         if not os.path.isabs(motion_module_path):
             motion_module_path = os.path.join(ROOT_PATH, motion_module_path)
-           
+
         unet3d = UNet3DConditionModel.from_pretrained_2d(
             pretrained_base_unet_folder_path,
             motion_module_path,
             unet_additional_kwargs=CONFIG.unet_additional_kwargs,
         ).to(dtype=WEIGHT_DETYPE, device=DEVICE)
-        
+
         unet3d.load_state_dict(
             torch.load(unet3d_model_path, map_location="cpu"),
             strict=False,
         )
-        
+
         return (unet3d,)
-    
+
 class Load_Pose_Guider:
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
-                "pose_guider_model_path": ("STRING", {"default": "./pretrained_weights/pose_guider.pth", "multiline": False}),
+                # "pose_guider_model_path": ("STRING", {"default": "./pose_guider.pth", "multiline": False}),
             },
         }
 
@@ -267,27 +300,27 @@ class Load_Pose_Guider:
     FUNCTION = "load_pose_guider"
 
     CATEGORY = "AnimateAnyone-Evolved/loaders"
-    
-    def load_pose_guider(self, pose_guider_model_path):
+
+    def load_pose_guider(self, pose_guider_model_path="./pose_guider.pth"):
         if not os.path.isabs(pose_guider_model_path):
             pose_guider_model_path = os.path.join(ROOT_PATH, pose_guider_model_path)
-        
+
         pose_guider = PoseGuider(320, block_out_channels=(16, 32, 96, 256)).to(
             dtype=WEIGHT_DETYPE, device=DEVICE
         )
         pose_guider.load_state_dict(
             torch.load(pose_guider_model_path, map_location="cpu"),
         )
-        
+
         return (pose_guider,)
-    
+
 class Pose_Guider_Encode:
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
                 "pose_guider": ("POSE_GUIDER",),
-                "pose_images": ("IMAGE",), 
+                "pose_images": ("IMAGE",),
             },
         }
 
@@ -300,17 +333,17 @@ class Pose_Guider_Encode:
     FUNCTION = "pose_guider_encode"
 
     CATEGORY = "AnimateAnyone-Evolved/processors"
-    
+
     def pose_guider_encode(self, pose_guider, pose_images):
-        
+
         cond_image_processor = VaeImageProcessor(
             do_convert_rgb=True,
             do_normalize=False,
         )
-        
+
         # (b, h, w, c) -> (b, c, h, w)
         pose_images = pose_images.permute(0, 3, 1, 2).to(DEVICE, dtype=WEIGHT_DETYPE)
-        
+
         # Prepare a list of pose condition images
         pose_cond_tensor_list = []
         for pose_image in pose_images:
@@ -327,5 +360,5 @@ class Pose_Guider_Encode:
         pose_latent = pose_guider(pose_cond_tensor)
         #print(f"pose_cond_tensor.shape: {pose_cond_tensor.shape}\pose_latent.shape: {pose_latent.shape}")
         #pose_cond_tensor.shape: torch.Size([1, 3, 24, 768, 512]) pose_latent.shape: torch.Size([1, 320, 24, 96, 64])
-        
+
         return (pose_latent,)

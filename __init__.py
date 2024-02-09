@@ -4,7 +4,7 @@ import inspect
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
 
-nodes_filename = "nodes"
+nodes_filename = "aa_nodes"
 module = importlib.import_module(f".{nodes_filename}", package=__name__)
 for name, cls in inspect.getmembers(module, inspect.isclass):
     if cls.__module__ == module.__name__:
